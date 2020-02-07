@@ -10,7 +10,20 @@ import chardet
 import distro
 import usb.core
 from pylspci.parsers import VerboseParser
+import psutil
 
+def getNetBasics():
+    NetworkInfo = {}
+    NetIf = psutil.net_if_addrs()
+    statsIf = psutil.net_if_stats()
+    for Interface in NetIf.keys():
+        NetworkInfo[Interface] = {}
+        # Up is not the same as connected (have to learn it the hard way)
+        NetworkInfo[Interface]["Up"] = str(statsIf[Interface].isup)
+        NetworkInfo[Interface]["duplex"] = str(statsIf[Interface].duplex)
+        NetworkInfo[Interface]["mtu"] = str(statsIf[Interface].mtu)
+        NetworkInfo[Interface]["speed"] = str(statsIf[Interface].speed)
+    return NetworkInfo
 
 def getPCI():
     lspci = VerboseParser()
@@ -29,6 +42,20 @@ def getUSB():
         usbDevsList[hex(dev.idVendor) + ":" + hex(dev.idProduct)]["product"] = str(dev.product)
         usbDevsList[hex(dev.idVendor) + ":" + hex(dev.idProduct)]["manufacturer"] = str(dev.manufacturer)
     return usbDevsList
+def getDKMS():
+    DKMSstats = {}
+    dmksout = subprocess.check_output(['dkms', 'status'])
+    dmksoutEnc = chardet.detect(dmksout)["encoding"]
+    dmksout = str(dmksout, dmksoutEnc)
+    for line in dmksout.splitlines():
+        line = line.strip()
+        infos = line.split(",")
+        DKMSstats[infos[0]] = {}
+        DKMSstats[infos[0]]["Version"] = infos[1].strip()
+        DKMSstats[infos[0]]["KernelVersion"] = infos[2].strip()
+        DKMSstats[infos[0]]["architecture"] = infos[3].split(":")[0].strip()
+        DKMSstats[infos[0]]["status"] = infos[3].split(":")[1].strip()
+    return DKMSstats
 
 def main():
     getUSB()
@@ -101,19 +128,31 @@ def main():
     xml_LinuxDist = ET.SubElement(TuxReport, "LinuxDistro", name=LinuxDistro, version=LinuxDistroVersion)
     xml_instSoftware = ET.SubElement(xml_LinuxDist, "InstalledSoftware")
     xml_LinuxKernel = ET.SubElement(xml_LinuxDist, "LinuxKernel", VersionString=Kernel)
+    xml_DKMS = ET.SubElement(xml_LinuxKernel, "DKMS")
     xml_System = ET.SubElement(TuxReport, "System")
+    xml_Network = ET.SubElement(xml_System, "Network")
+    xmlc_NetworkUp = ET.Comment("for a network interface the status Up does not mean that it is connected to anything. It just means it would accept connections.")
+    xmlc_NetworkSpeed = ET.Comment("the NIC speed expressed in megabits, if it cannot be determined it will be set to 0.")
+    xml_Network.insert(0,xmlc_NetworkUp)
+    xml_Network.insert(1, xmlc_NetworkSpeed)
+
     xml_pciBus = ET.SubElement(xml_System, "PCI")
     xml_usbBus = ET.SubElement(xml_System, "USB")
     xml_PKGMgr = ET.SubElement(xml_LinuxDist, "PKGManager")
     for filename, cont in PKGMgrCfg.items():
         xml_PKFcfgFile = ET.SubElement(xml_PKGMgr, "cfg-file", filename=filename)
         xml_PKFcfgFile.text = cont
+    for modName, info in getDKMS().items():
+        xml_DKMSMod = ET.SubElement(xml_DKMS, modName, info)
+    for CardName, info in getNetBasics().items():
+        xml_Networkcard = ET.SubElement(xml_Network, CardName, info)
 
     for pkg in installedPKG.items():
         ET.SubElement(xml_instSoftware, "pkg", version=pkg[1]).text = pkg[0]
 
     xml_MotherBoard = ET.SubElement(xml_System, "MotherBoard", MotherBoard)
-
+    xml_CPU = ET.SubElement(xml_MotherBoard, "CPU", count=str(psutil.cpu_count(logical=False)),
+                            logicalcount=str(psutil.cpu_count(logical=True)))
     for dev in pciDevs:
         xml_pciDev = ET.SubElement(xml_pciBus, "dev", id=dev.device.name, slot=str(dev.slot), vendor=str(dev.vendor),
                                    driver=str(dev.driver), name=dev.device.name, revision=str(dev.revision))
@@ -124,6 +163,17 @@ def main():
         localDict = dev
         localDict["id"] = devID
         xml_usbDev = ET.SubElement(xml_usbBus, "dev", localDict)
+
+    cpuUseP = psutil.cpu_percent(interval=2, percpu=True)
+    cpuTimesP = psutil.cpu_times_percent(interval=2, percpu=True)
+
+    xmlc_CPUinfo = ET.Comment("this values are collected by 2 commands. both blocking for 2 seconds. It is not at the same time collected.")
+    xmlc_CPUinfo2 = ET.Comment("The value ending with P are % ")
+
+    xml_CPU.insert(0, xmlc_CPUinfo)
+    xml_CPU.insert(1, xmlc_CPUinfo2)
+    for CPU in range(psutil.cpu_count(logical=True)):
+        xml_CPUthread = ET.SubElement(xml_CPU, "LCPU", CPUUseP=str(cpuUseP[CPU]), userP=str(cpuTimesP[CPU].user),idleP=str(cpuTimesP[CPU].idle), systemP=str(cpuTimesP[CPU].system), iowaitP=str(cpuTimesP[CPU].iowait))
 
 
     tree = ET.ElementTree(TuxReport).getroot()
