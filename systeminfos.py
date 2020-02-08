@@ -11,6 +11,23 @@ import distro
 import usb.core
 from pylspci.parsers import VerboseParser
 import psutil
+from dmidecode import DMIDecode
+
+
+def getRAM():
+    r = {}
+    RAMs = DMIDecode().get(17)
+    for RAM in RAMs:
+        r[RAM["Bank Locator"]]= {}
+        r[RAM["Bank Locator"]]['Size'] = str(RAM["Size"])
+        r[RAM["Bank Locator"]]['ConfiguredVoltage'] = str(RAM['Configured Voltage'])
+        r[RAM["Bank Locator"]]['FormFactor'] = str(RAM['Form Factor'])
+        r[RAM["Bank Locator"]]['Type'] = str(RAM['Type'])
+        r[RAM["Bank Locator"]]['TypeDetail'] = str(RAM['Type Detail'])
+        r[RAM["Bank Locator"]]['PartNumber'] = str(RAM['Part Number'])
+    return r
+
+
 
 def getNetBasics():
     NetworkInfo = {}
@@ -30,6 +47,15 @@ def getPCI():
     pciData = lspci.run()
     return pciData
 
+def getDisks():
+    Disks = {}
+    for mount in psutil.disk_partitions():
+        Disks[mount.device] = {}
+        Disks[mount.device]["mountpoints"] = {}
+    for mount in psutil.disk_partitions():
+        Disks[mount.device]["fstype"] = mount.fstype
+        Disks[mount.device]["mountpoints"][mount.mountpoint] = mount.opts
+    return Disks
 
 def getUSB():
     usbDevsList = {}
@@ -82,7 +108,7 @@ def main():
 
 
     LinuxDistro = distro.linux_distribution()[0]
-    LinuxDistroVersion = distro.linux_distribution()[0]
+    LinuxDistroVersion = distro.linux_distribution()[1]
     Kernel = platform.platform()
     pciDevs = getPCI()
     usbDevs = getUSB()
@@ -135,10 +161,11 @@ def main():
     xmlc_NetworkSpeed = ET.Comment("the NIC speed expressed in megabits, if it cannot be determined it will be set to 0.")
     xml_Network.insert(0,xmlc_NetworkUp)
     xml_Network.insert(1, xmlc_NetworkSpeed)
-
+    xml_Disks = ET.SubElement(xml_System, "Disks")
     xml_pciBus = ET.SubElement(xml_System, "PCI")
     xml_usbBus = ET.SubElement(xml_System, "USB")
     xml_PKGMgr = ET.SubElement(xml_LinuxDist, "PKGManager")
+
     for filename, cont in PKGMgrCfg.items():
         xml_PKFcfgFile = ET.SubElement(xml_PKGMgr, "cfg-file", filename=filename)
         xml_PKFcfgFile.text = cont
@@ -150,9 +177,11 @@ def main():
     for pkg in installedPKG.items():
         ET.SubElement(xml_instSoftware, "pkg", version=pkg[1]).text = pkg[0]
 
+
     xml_MotherBoard = ET.SubElement(xml_System, "MotherBoard", MotherBoard)
     xml_CPU = ET.SubElement(xml_MotherBoard, "CPU", count=str(psutil.cpu_count(logical=False)),
-                            logicalcount=str(psutil.cpu_count(logical=True)))
+                            logicalcount=str(psutil.cpu_count(logical=True)), type=DMIDecode().cpu_type())
+    xml_RAM = ET.SubElement(xml_MotherBoard, "RAM", size=str(psutil.virtual_memory().total), free=str(psutil.virtual_memory().free), available=str(psutil.virtual_memory().available))
     for dev in pciDevs:
         xml_pciDev = ET.SubElement(xml_pciBus, "dev", id=dev.device.name, slot=str(dev.slot), vendor=str(dev.vendor),
                                    driver=str(dev.driver), name=dev.device.name, revision=str(dev.revision))
@@ -169,18 +198,31 @@ def main():
 
     xmlc_CPUinfo = ET.Comment("this values are collected by 2 commands. both blocking for 2 seconds. It is not at the same time collected.")
     xmlc_CPUinfo2 = ET.Comment("The value ending with P are % ")
-
+    xmlc_CPUinfo3 = ET.Comment("The value ending with freq are MHz ")
     xml_CPU.insert(0, xmlc_CPUinfo)
     xml_CPU.insert(1, xmlc_CPUinfo2)
+    xml_CPU.insert(2, xmlc_CPUinfo3)
     for CPU in range(psutil.cpu_count(logical=True)):
-        xml_CPUthread = ET.SubElement(xml_CPU, "LCPU", CPUUseP=str(cpuUseP[CPU]), userP=str(cpuTimesP[CPU].user),idleP=str(cpuTimesP[CPU].idle), systemP=str(cpuTimesP[CPU].system), iowaitP=str(cpuTimesP[CPU].iowait))
+        xml_CPUthread = ET.SubElement(xml_CPU, "LCPU", CPUUseP=str(cpuUseP[CPU]), userP=str(cpuTimesP[CPU].user),
+                                      idleP=str(cpuTimesP[CPU].idle), systemP=str(cpuTimesP[CPU].system),
+                                      iowaitP=str(cpuTimesP[CPU].iowait),currentfreq = str(psutil.cpu_freq(percpu=True)[CPU].current),
+                                      minfreq = str(psutil.cpu_freq(percpu=True)[CPU].min),
+                                      maxfreq = str(psutil.cpu_freq(percpu=True)[CPU].max))
 
+    for Disk, info in getDisks().items():
+        xml_Part = ET.SubElement(xml_Disks, "Part", path=Disk, fstype=info["fstype"])
+        for path, opts in info["mountpoints"].items():
+            xml_Mount = ET.SubElement(xml_Part, "Mount", path=path).text = opts
+
+    for Bank, info in getRAM().items():
+        info["Bank"]= str(Bank)
+        xml_RAMbank = ET.SubElement(xml_RAM, "stick", info)
 
     tree = ET.ElementTree(TuxReport).getroot()
     xmlstr = minidom.parseString(tostring(tree, encoding='utf8')).toprettyxml()
     print(xmlstr)
     # ToDo: send Text to Tuxedo
-
+    
 
 if __name__ == '__main__':
     main()
